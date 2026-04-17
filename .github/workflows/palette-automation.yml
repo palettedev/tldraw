@@ -1,0 +1,65 @@
+name: palette-automation
+
+on:
+  schedule:
+    # Every 5 minutes. GitHub may delay scheduled runs under load; 5 min is the
+    # minimum interval, and actual dispatch can be 5-15 min late on free tier.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  # Skip this run if a previous one is still going — we'd rather drop a tick
+  # than stack up runners.
+  group: palette-automation
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'yarn'
+
+      - name: Turbo cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.cache/turbo
+          key: turbo-automation-${{ github.sha }}
+          restore-keys: turbo-automation-
+
+      - name: Install modules
+        run: yarn install --frozen-lockfile
+
+      - name: Build www (production)
+        # No PALETTE_ASSET_KEY / VERCEL_ENV here — we do NOT want each scheduled
+        # run to register a new release or re-upload source maps. The prod SDK
+        # bundle is selected because `next build` forces NODE_ENV=production.
+        run: yarn build:www
+
+      - name: Start server
+        run: |
+          nohup yarn serve:www > /tmp/serve.log 2>&1 &
+          echo $! > /tmp/serve.pid
+
+      - name: Wait for server
+        run: npx --yes wait-on http://localhost:3000 --timeout 120000
+
+      - name: Install Playwright + Chromium
+        run: |
+          npm install --no-save --no-audit --no-fund playwright
+          npx playwright install --with-deps chromium
+
+      - name: Run automation
+        env:
+          URL: http://localhost:3000
+          HEADLESS: '1'
+        run: node scripts/create-rects.mjs
+
+      - name: Server log (on failure)
+        if: failure()
+        run: tail -200 /tmp/serve.log || true
