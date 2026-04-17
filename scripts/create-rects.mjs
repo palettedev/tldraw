@@ -18,6 +18,38 @@ async function run() {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
   const page = await context.newPage()
 
+  // Log palette SDK activity for debugging.
+  page.on('console', (msg) => {
+    const type = msg.type()
+    const text = msg.text()
+    if (
+      type === 'error' ||
+      type === 'warning' ||
+      /palette|collect|flush|queue|beacon/i.test(text)
+    ) {
+      console.log(`[browser:${type}] ${text}`)
+    }
+  })
+  page.on('pageerror', (err) => console.log(`[pageerror] ${err.message}`))
+  page.on('request', (req) => {
+    const u = req.url()
+    if (u.includes('palette.dev') || u.includes('/api/collect')) {
+      console.log(`[req] ${req.method()} ${u}`)
+    }
+  })
+  page.on('response', async (res) => {
+    const u = res.url()
+    if (u.includes('palette.dev') || u.includes('/api/collect')) {
+      console.log(`[res] ${res.status()} ${u}`)
+    }
+  })
+  page.on('requestfailed', (req) => {
+    const u = req.url()
+    if (u.includes('palette.dev') || u.includes('/api/collect')) {
+      console.log(`[fail] ${req.method()} ${u} — ${req.failure()?.errorText}`)
+    }
+  })
+
   console.log(`→ opening ${URL}`)
   await page.goto(URL, { waitUntil: 'networkidle' })
 
@@ -110,6 +142,44 @@ async function run() {
   if (!HEADLESS) {
     await page.waitForTimeout(1500)
   }
+
+  // Force palette SDK to flush buffered events. The SDK listens for
+  // visibilitychange->hidden and pagehide (see
+  // palette/packages/client/browser/core/queue.ts onHidden) and POSTs via
+  // fetch(..., { keepalive: true }). Dispatch both, then give the idle
+  // callback + network a moment before tearing down.
+  console.log('→ flushing palette events')
+  await page.evaluate(() => {
+    try {
+      Object.defineProperty(document, 'visibilityState', {
+        value: 'hidden',
+        configurable: true,
+      })
+      Object.defineProperty(document, 'hidden', { value: true, configurable: true })
+    } catch {}
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('pagehide'))
+  })
+  await page.waitForTimeout(2500)
+
+  // Also wait for the natural 5s debounced auto-flush cycle.
+  console.log('→ waiting 6s for debounced flush cycle')
+  await page.waitForTimeout(6000)
+
+  // Peek at the palette internals if exposed.
+  const paletteState = await page.evaluate(() => {
+    const g = globalThis.__palette__
+    if (!g) return { exists: false }
+    return {
+      exists: true,
+      keys: Object.keys(g),
+      queueLen: g?.queue?.buffer?.length,
+      enabled: g?.settings?.get?.('enabled'),
+      endpoint: g?.settings?.get?.('endpoint'),
+    }
+  })
+  console.log('[palette state]', JSON.stringify(paletteState))
+
   await browser.close()
 }
 

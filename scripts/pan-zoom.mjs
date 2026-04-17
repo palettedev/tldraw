@@ -92,6 +92,23 @@ async function run() {
 
   console.log('done')
   await sleep(500)
+
+  // Force palette SDK to flush buffered events (see
+  // palette/packages/client/browser/core/queue.ts onHidden).
+  console.log('→ flushing palette events')
+  await page.evaluate(() => {
+    try {
+      Object.defineProperty(document, 'visibilityState', {
+        value: 'hidden',
+        configurable: true,
+      })
+      Object.defineProperty(document, 'hidden', { value: true, configurable: true })
+    } catch {}
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('pagehide'))
+  })
+  await sleep(2500)
+
   await browser.close()
 }
 
